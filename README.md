@@ -43,16 +43,16 @@ DriveSim/
 
 ## Бібліотеки, які використовуються
 
-- `nanoMODBUS`
+- [`nanoMODBUS`](https://github.com/debevv/nanoMODBUS)
   Призначення: реалізація протоколу `Modbus`, обробка запитів клієнта, виклик callback-функцій для читання і запису регістрів.
 
-- `tinycsocket`
+- [`tinycsocket`](https://github.com/dosshell/tinycsocket)
   Призначення: кросплатформова робота з TCP-сокетами. Використовується для створення `Modbus TCP` сервера, прив'язки до порту, очікування і приймання клієнтів.
 
-- `tinycthread`
+- [`tinycthread`](https://github.com/tinycthread/tinycthread)
   Призначення: кросплатформові потоки і mutex-и за стилем `C11 threads`. Використовується для окремого потоку симуляції та окремого потоку виводу швидкості.
 
-- `Unity`
+- [`Unity`](https://github.com/ThrowTheSwitch/unity)
   Призначення: модульне тестування. Використовується для перевірки фізичної моделі в `tests/VehicleTests.c`.
 
 ## Як зібрати і запустити
