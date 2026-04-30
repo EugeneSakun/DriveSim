@@ -10,8 +10,15 @@
 
 enum
 {
-    DISCRETE_INPUT_ADDRESS = 0,
-    TORQUE_REGISTER_ADDRESS = 0,
+    /* TCP порт сервера Modbus */
+    PORT = 5020,
+
+    /* Адреси Modbus регістрів */
+
+    /* Дискретні входи (тільки читання) */
+    ACCELERATOR_SENSOR_FAILURE_ADDRESS = 0,
+
+    /* 16-бітні вхідні регістри (тільки читання) */
     PARAM_MASS_ADDRESS = 0,
     PARAM_FRONTAL_AREA_ADDRESS = 1,
     PARAM_ROLLING_RESISTANCE_ADDRESS = 2,
@@ -19,19 +26,27 @@ enum
     PARAM_MOTOR_MAX_TORQUE_ADDRESS = 4,
     PARAM_GEAR_RATIO_ADDRESS = 5,
     PARAM_WHEEL_RADIUS_ADDRESS = 6,
+    /* Кількість 16-бітних вхідних регістрів */
     PARAM_COUNT = 7,
-    PORT = 5020
+
+    /* 16-бітні вихідні регістри (читання та запис) */
+    TORQUE_REGISTER_ADDRESS = 0,
 };
 
 typedef struct
 {
+    /* Усі потоки працюють з одним спільним станом через цю структуру. */
     Vehicle vehicle;
     mtx_t vehicle_mutex;
-    bool discrete_input;
+    bool accelerator_sensor_failure;
 } AppContext;
 
+/* Періодично виводить поточну швидкість у консоль.
+ * arg - вказівник на AppContext зі спільним станом програми.
+ */
 static int heartbeat_thread(void* arg)
 {
+    /* Цей потік лише показує поточну швидкість раз на секунду. */
     AppContext* context = (AppContext*) arg;
     struct timespec interval = {
         .tv_sec = 1,
@@ -42,6 +57,7 @@ static int heartbeat_thread(void* arg)
     {
         double speed_m_per_s;
 
+        /* Mutex потрібен, щоб не читати стан одночасно з його оновленням в іншому потоці. */
         mtx_lock(&context->vehicle_mutex);
         speed_m_per_s = Vehicle_get_speed(&context->vehicle);
         mtx_unlock(&context->vehicle_mutex);
@@ -54,12 +70,16 @@ static int heartbeat_thread(void* arg)
     return 0;
 }
 
+/* Виконує симуляцію електромобіля у окремому потоці.
+ * arg - вказівник на AppContext зі спільним станом програми.
+ */
 static int vehicle_simulation_thread(void* arg)
 {
+    /* Основний цикл симуляції: кожні 20 мс робимо один крок розрахунку. */
     AppContext* context = (AppContext*) arg;
     struct timespec interval = {
         .tv_sec = 0,
-        .tv_nsec = 20000000
+        .tv_nsec = 20000000L
     };
 
     while (1)
@@ -73,28 +93,50 @@ static int vehicle_simulation_thread(void* arg)
     return 0;
 }
 
+/* Перевіряє, що запит адресований рівно одному очікуваному регістру.
+ * address - початкова адреса з Modbus-запиту.
+ * quantity - кількість регістрів у запиті.
+ * expected_address - адреса, яку ця функція дозволяє.
+ */
 static nmbs_error expect_single_register(uint16_t address, uint16_t quantity, uint16_t expected_address)
 {
+    /* Для простоти цей навчальний приклад дозволяє працювати лише з одним регістром за раз. */
     if (address != expected_address || quantity != 1)
         return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
 
     return NMBS_ERROR_NONE;
 }
 
+/* Перетворює число double у 16-бітне ціле з заданим масштабом.
+ * value - вихідне значення.
+ * scale - множник для збереження дробової частини.
+ */
 static uint16_t encode_scaled(double value, double scale)
 {
+    /* Modbus-регістр має 16 біт, тому дробові величини передаємо як ціле число зі scale. */
     if (value <= 0.0)
         return 0;
 
     return (uint16_t) (value * scale + 0.5);
 }
 
+/* Перевіряє, чи не перевищує команда моменту можливості двигуна.
+ * context - спільний стан з параметрами електромобіля.
+ * torque_command - команда моменту в int16.
+ */
 static bool is_torque_command_valid(const AppContext* context, int16_t torque_command)
 {
     const double max_torque = context->vehicle.params.motor_max_torque_nm;
     return torque_command >= -(int16_t) max_torque && torque_command <= (int16_t) max_torque;
 }
 
+/* Обробляє читання discrete inputs через Modbus.
+ * address - адреса першого біта.
+ * quantity - кількість бітів для читання.
+ * inputs_out - буфер, куди записується результат.
+ * unit_id - адреса пристрою Modbus, тут не використовується.
+ * arg - вказівник на AppContext.
+ */
 static nmbs_error read_discrete_inputs(
     uint16_t address,
     uint16_t quantity,
@@ -105,15 +147,23 @@ static nmbs_error read_discrete_inputs(
     (void) unit_id;
 
     AppContext* context = (AppContext*) arg;
-    nmbs_error err = expect_single_register(address, quantity, DISCRETE_INPUT_ADDRESS);
+    nmbs_error err = expect_single_register(address, quantity, ACCELERATOR_SENSOR_FAILURE_ADDRESS);
     if (err != NMBS_ERROR_NONE)
         return err;
 
+    /* У цьому прикладі discrete input 0 сигналізує про помилкову команду моменту. */
     memset(inputs_out, 0, 1);
-    nmbs_bitfield_write(inputs_out, 0, context->discrete_input);
+    nmbs_bitfield_write(inputs_out, 0, context->accelerator_sensor_failure);
     return NMBS_ERROR_NONE;
 }
 
+/* Обробляє читання holding register з командою моменту.
+ * address - адреса першого регістру.
+ * quantity - кількість регістрів для читання.
+ * registers_out - буфер, куди записується значення.
+ * unit_id - адреса пристрою Modbus, тут не використовується.
+ * arg - вказівник на AppContext.
+ */
 static nmbs_error read_holding_registers(
     uint16_t address,
     uint16_t quantity,
@@ -128,12 +178,20 @@ static nmbs_error read_holding_registers(
     if (err != NMBS_ERROR_NONE)
         return err;
 
+    /* Повертаємо останню прийняту команду моменту. */
     mtx_lock(&context->vehicle_mutex);
     registers_out[0] = (uint16_t) ((int16_t) context->vehicle.commanded_torque_nm);
     mtx_unlock(&context->vehicle_mutex);
     return NMBS_ERROR_NONE;
 }
 
+/* Обробляє читання input registers з параметрами електромобіля.
+ * address - адреса першого регістру.
+ * quantity - кількість регістрів для читання.
+ * registers_out - буфер, куди записуються значення.
+ * unit_id - адреса пристрою Modbus, тут не використовується.
+ * arg - вказівник на AppContext.
+ */
 static nmbs_error read_input_registers(
     uint16_t address,
     uint16_t quantity,
@@ -152,6 +210,7 @@ static nmbs_error read_input_registers(
     if ((uint32_t) address + (uint32_t) quantity > PARAM_COUNT)
         return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
 
+    /* Клієнт може читати параметри електромобіля як таблицю послідовних регістрів. */
     mtx_lock(&context->vehicle_mutex);
 
     for (i = 0; i < quantity; ++i)
@@ -159,6 +218,7 @@ static nmbs_error read_input_registers(
         switch (address + i)
         {
         case PARAM_MASS_ADDRESS:
+            /* Для цілих значень scale = 1, для дробових зберігаємо значення помноженим. */
             registers_out[i] = encode_scaled(context->vehicle.params.mass_kg, 1.0);
             break;
         case PARAM_FRONTAL_AREA_ADDRESS:
@@ -189,6 +249,12 @@ static nmbs_error read_input_registers(
     return NMBS_ERROR_NONE;
 }
 
+/* Обробляє запис одного holding register з командою моменту.
+ * address - адреса регістру для запису.
+ * value - нове значення регістру.
+ * unit_id - адреса пристрою Modbus, тут не використовується.
+ * arg - вказівник на AppContext.
+ */
 static nmbs_error write_single_register(uint16_t address, uint16_t value, uint8_t unit_id, void* arg)
 {
     (void) unit_id;
@@ -202,13 +268,15 @@ static nmbs_error write_single_register(uint16_t address, uint16_t value, uint8_
     mtx_lock(&context->vehicle_mutex);
     if (!is_torque_command_valid(context, torque_command))
     {
-        context->discrete_input = true;
+        /* Якщо команда виходить за межі, не застосовуємо її і підіймаємо прапорець помилки. */
+        context->accelerator_sensor_failure = true;
         mtx_unlock(&context->vehicle_mutex);
         printf("Invalid torque command received: %d Nm\n", torque_command);
         return NMBS_EXCEPTION_ILLEGAL_DATA_VALUE;
     }
 
-    context->discrete_input = false;
+    context->accelerator_sensor_failure = false;
+    /* Після перевірки передаємо команду в модель електромобіля. */
     Vehicle_set_torque(&context->vehicle, (double) torque_command);
     mtx_unlock(&context->vehicle_mutex);
 
@@ -216,6 +284,13 @@ static nmbs_error write_single_register(uint16_t address, uint16_t value, uint8_
     return NMBS_ERROR_NONE;
 }
 
+/* Обробляє запис кількох регістрів; у цьому прикладі використовується один.
+ * address - адреса першого регістру для запису.
+ * quantity - кількість переданих регістрів.
+ * registers - масив нових значень.
+ * unit_id - адреса пристрою Modbus, тут не використовується.
+ * arg - вказівник на AppContext.
+ */
 static nmbs_error write_multiple_registers(
     uint16_t address,
     uint16_t quantity,
@@ -236,13 +311,13 @@ static nmbs_error write_multiple_registers(
     mtx_lock(&context->vehicle_mutex);
     if (!is_torque_command_valid(context, torque_command))
     {
-        context->discrete_input = true;
+        context->accelerator_sensor_failure = true;
         mtx_unlock(&context->vehicle_mutex);
         printf("Invalid torque command received: %d Nm\n", torque_command);
         return NMBS_EXCEPTION_ILLEGAL_DATA_VALUE;
     }
 
-    context->discrete_input = false;
+    context->accelerator_sensor_failure = false;
     Vehicle_set_torque(&context->vehicle, (double) torque_command);
     mtx_unlock(&context->vehicle_mutex);
 
@@ -250,9 +325,11 @@ static nmbs_error write_multiple_registers(
     return NMBS_ERROR_NONE;
 }
 
+/* Налаштовує модель електромобіля, потоки і Modbus-сервер, а потім запускає програму. */
 int main(void)
 {
     AppContext app;
+    /* Початкові параметри моделі електромобіля. */
     VehicleParams vehicle_params = {
         .mass_kg = 1600.0,
         .frontal_area_m2 = 2.2,
@@ -267,8 +344,9 @@ int main(void)
 
     Vehicle_init(&app.vehicle, &vehicle_params);
     Vehicle_set_torque(&app.vehicle, 120.0);
-    app.discrete_input = false;
+    app.accelerator_sensor_failure = false;
 
+    /* Один mutex захищає увесь стан vehicle, бо він невеликий і так простіше. */
     if (mtx_init(&app.vehicle_mutex, mtx_plain) != thrd_success)
     {
         fprintf(stderr, "mtx_init failed\n");
@@ -313,6 +391,7 @@ int main(void)
 
     ModbusTcpCallbacks callbacks;
     ModbusTcp_callbacks_init(&callbacks);
+    /* Тут призначаємо функції-обробники для Modbus-команд (callbacks). */
     callbacks.read_discrete_inputs = read_discrete_inputs;
     callbacks.read_holding_registers = read_holding_registers;
     callbacks.read_input_registers = read_input_registers;
