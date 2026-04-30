@@ -3,10 +3,16 @@
 #
 
 # Add source to this project's executable.
-add_executable (DriveSim "DriveSim.c")
+add_executable (DriveSim
+  "DriveSim.c"
+  "ModbusTcp.c"
+  "Vehicle.c"
+)
 
-if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET DriveSim PROPERTY CXX_STANDARD 20)
-endif()
+target_link_libraries(DriveSim PRIVATE
+  nanoMODBUS
+  tinycsocket
+  tinycthread
+)
 
 # TODO: Add tests and install targets if needed.
