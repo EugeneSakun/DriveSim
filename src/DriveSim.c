@@ -343,7 +343,7 @@ int main(void)
     thrd_t simulation;
 
     Vehicle_init(&app.vehicle, &vehicle_params);
-    Vehicle_set_torque(&app.vehicle, 120.0);
+    Vehicle_set_torque(&app.vehicle, 0.0);
     app.accelerator_sensor_failure = false;
 
     /* Один mutex захищає увесь стан vehicle, бо він невеликий і так простіше. */
