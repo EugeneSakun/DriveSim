@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "ModbusTcp.h"
 #include "Vehicle.h"
@@ -66,6 +67,59 @@ static int heartbeat_thread(void* arg)
         fflush(stdout);
         thrd_sleep(&interval, NULL);
     }
+
+    return 0;
+}
+
+/* Періодично логує поточні torque, speed, distance у CSV-файл.
+ * arg — вказівник на AppContext зі спільним станом програми.
+ */
+static int logger_thread(void *arg)
+{
+    AppContext *context = (AppContext*) arg;
+
+    char filename[64];
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+
+    strftime(filename, sizeof(filename), "%Y-%m-%d_%H-%M-%S_vehicle_log.csv", tm_info);
+
+    FILE *log_file = fopen(filename, "w");
+
+    if (!log_file)
+    {
+        fprintf(stderr, "Failed to open log file\n");
+        return -1;
+    }
+
+    printf("Logging to file: %s\n", filename);
+
+    fprintf(log_file, "torque,speed,distance\n");
+    fflush(log_file);
+
+    struct timespec interval = {
+        .tv_sec = 0,
+        .tv_nsec = 100000000L
+    };
+
+    while (true)
+    {
+        double speed, torque, distance;
+
+        mtx_lock(&context->vehicle_mutex);
+        speed = Vehicle_get_speed(&context->vehicle);
+        torque = context->vehicle.commanded_torque_nm;
+        distance = context->vehicle.distance_m;
+        mtx_unlock(&context->vehicle_mutex);
+
+        fprintf(log_file,"%.3f,%.3f,%.3f\n", torque, speed, distance);
+        fflush(log_file);
+
+        thrd_sleep(&interval, NULL);
+    }
+
+    fclose(log_file);
 
     return 0;
 }
@@ -341,6 +395,7 @@ int main(void)
     };
     thrd_t heartbeat;
     thrd_t simulation;
+    thrd_t logger;
 
     Vehicle_init(&app.vehicle, &vehicle_params);
     Vehicle_set_torque(&app.vehicle, 120.0);
@@ -375,6 +430,20 @@ int main(void)
     }
 
     if (thrd_detach(heartbeat) != thrd_success)
+    {
+        fprintf(stderr, "thrd_detach failed\n");
+        mtx_destroy(&app.vehicle_mutex);
+        return 1;
+    }
+
+    if (thrd_create(&logger, logger_thread, &app) != thrd_success)
+    {
+        fprintf(stderr, "thrd_create failed\n");
+        mtx_destroy(&app.vehicle_mutex);
+        return 1;
+    }
+
+    if (thrd_detach(logger) != thrd_success)
     {
         fprintf(stderr, "thrd_detach failed\n");
         mtx_destroy(&app.vehicle_mutex);
